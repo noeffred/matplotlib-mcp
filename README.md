@@ -86,7 +86,24 @@ Set `MCP_THEME_PATH` to select another YAML file. An absent default file keeps
 the existing appearance; an explicitly selected missing file or an invalid
 theme prevents startup. Restart the server after changing the theme or fonts.
 
-Mount a theme directory, including any custom font files, read-only:
+The [example theme](examples/theme/theme.yaml) uses DejaVu Sans, which ships
+with the installed Matplotlib package in its `mpl-data/fonts/ttf/` directory.
+Those default fonts are already available locally and in the Docker image;
+you do not need to copy them into this repository.
+
+Custom corporate fonts are not included. Supply your own TTF/OTF files beside
+the theme YAML, using this layout on the host (create `examples/theme/fonts/`
+if needed):
+
+```text
+examples/theme/
+├── theme.yaml
+└── fonts/
+    ├── CorporateSans-Regular.ttf
+    └── CorporateSans-Bold.ttf
+```
+
+Mount that entire theme directory read-only:
 
 ```sh
 docker run --rm -p 127.0.0.1:8000:8000 -e MCP_API_KEY \
@@ -94,9 +111,10 @@ docker run --rm -p 127.0.0.1:8000:8000 -e MCP_API_KEY \
   matplotlib-mcp
 ```
 
-The [example theme](examples/theme/theme.yaml) works with the bundled DejaVu
-Sans font. To use corporate fonts, copy your TTF/OTF files into a `fonts/`
-subdirectory and configure their internal family name:
+With this mount, `examples/theme/fonts/CorporateSans-Regular.ttf` on the host
+is available at `/etc/matplotlib-mcp/fonts/CorporateSans-Regular.ttf` inside
+the container. In `theme.yaml`, list paths relative to that YAML file and set
+the font's internal family name (which can differ from its filename):
 
 ```yaml
 colors:
@@ -115,6 +133,10 @@ font:
     - fonts/CorporateSans-Regular.ttf
     - fonts/CorporateSans-Bold.ttf
 ```
+
+For a local server without Docker, the same layout works: set
+`MCP_THEME_PATH=examples/theme/theme.yaml` before starting `matplotlib-mcp`.
+Font paths still resolve relative to the YAML file's directory.
 
 All settings are optional; omitted settings retain Matplotlib defaults.
 `palette` must be a non-empty list of Matplotlib color strings; quote hex colors

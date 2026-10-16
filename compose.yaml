@@ -10,7 +10,17 @@ services:
       MCP_HOST: "0.0.0.0"
       MCP_PORT: "8000"
       MCP_ALLOWED_HOSTS: "${MCP_ALLOWED_HOSTS:-localhost:8000,127.0.0.1:8000,matplotlib-mcp:8000}"
-    # Covers the server and renderer together. Equal swap limit disables swap.
+    
+    # Optional corporate theme and fonts: uncomment both lines below to enable.
+    # Edit examples/theme/theme.yaml and place custom TTF/OTF files in
+    # examples/theme/fonts/, listed as fonts/<filename> in theme.yaml.
+    # The mount uses the default theme path; MCP_THEME_PATH is not needed.
+    # After enabling, run docker compose up -d; after theme/font edits,
+    # run docker compose restart matplotlib-mcp to reload them.
+    # volumes:
+    #   - ./examples/theme:/etc/matplotlib-mcp:ro
+
+    # Limit memory usage. Equal swap limit disables swap.
     mem_limit: 512000000
     memswap_limit: 512000000
     ulimits:
