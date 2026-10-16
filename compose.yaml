@@ -1,0 +1,22 @@
+services:
+  matplotlib-mcp:
+    build: .
+    restart: unless-stopped
+    init: true
+    ports:
+      - "127.0.0.1:8000:8000"
+    environment:
+      MCP_API_KEY: "${MCP_API_KEY:?Set MCP_API_KEY to a random secret of at least 16 characters}"
+      MCP_HOST: "0.0.0.0"
+      MCP_PORT: "8000"
+      MCP_ALLOWED_HOSTS: "${MCP_ALLOWED_HOSTS:-localhost:8000,127.0.0.1:8000,matplotlib-mcp:8000}"
+    # Covers the server and renderer together. Equal swap limit disables swap.
+    mem_limit: 512000000
+    memswap_limit: 512000000
+    ulimits:
+      core: 0
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

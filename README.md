@@ -27,6 +27,46 @@ One MCP process supervises one renderer subprocess. Rendering is serialized, whi
 
 ## Docker
 
+The included [Compose configuration](compose.yaml) provides defaults to get you
+up and running quickly. From the repository root, generate a local API key and
+start the service:
+
+```sh
+export MCP_API_KEY="$(openssl rand -hex 32)"
+docker compose up -d --build
+```
+
+The supplied defaults are:
+
+| Setting | Compose default |
+| --- | --- |
+| Image | Built from the local repository (`build: .`) |
+| Restart policy | `unless-stopped`: restart automatically unless explicitly stopped |
+| Process management | `init: true` enables a small init process to forward signals and reap child processes |
+| Host port | `127.0.0.1:8000:8000`, accessible only through the host's loopback interface |
+| Server bind address | `MCP_HOST=0.0.0.0` and `MCP_PORT=8000` inside the container |
+| API key | Required through `MCP_API_KEY`; no default secret is supplied |
+| Allowed HTTP hosts | `localhost:8000,127.0.0.1:8000,matplotlib-mcp:8000` |
+| Memory | 512 MB (512,000,000 bytes) for the server and renderer together, with no additional swap |
+| Core dumps | Disabled (`ulimits.core: 0`) |
+| Logs | Docker `json-file` driver, rotating at `10m` with up to 3 files |
+
+These are starting defaults; adjust `compose.yaml` for your deployment. The
+service uses one application process and the default chart and renderer limits
+documented below. The endpoint is `http://localhost:8000/mcp`. Configure your
+client with the generated key as its bearer token.
+
+Compose also loads `MCP_API_KEY` from a local, Git-ignored `.env` file if you
+prefer to retain it across shell sessions; keep it at least 16 characters long.
+`MCP_ALLOWED_HOSTS` can be overridden through the environment or `.env`; it
+defaults to `localhost:8000,127.0.0.1:8000,matplotlib-mcp:8000`. Clients on the
+Compose network can use `http://matplotlib-mcp:8000/mcp`. For remote access, use
+an HTTPS reverse proxy and add its public hostname to `MCP_ALLOWED_HOSTS`.
+Use `docker compose logs -f` to view logs and `docker compose down` to stop and
+remove the service.
+
+Alternatively, run the image directly:
+
 ```sh
 docker build -t matplotlib-mcp .
 export MCP_API_KEY='replace-with-a-long-random-secret'
@@ -130,6 +170,8 @@ file paths. Chart requests cannot load font files or supply a theme file.
 }
 ```
 
+The example creates a 20.32 × 12.7 cm figure. To specify a size in centimetres, divide each dimension by 2.54 for Matplotlib's `figsize` values.
+
 Data may be named vectors/matrices (`{"format":"columns","values":...}`), JSON objects (`{"format":"rows","rows":[...]}`), or CSV text (`{"format":"csv","csv":"..."}`). Use an exact `{"$data":"column"}` object anywhere in call args or kwargs to refer to a named column. Matrices are useful for `imshow`, contour, and grid based methods. Every call supplies fresh data; the server keeps no chart or dataset state.
 
 Named columns may have different lengths, for example histogram edges and values or independent grid coordinates. Plot arguments must still have compatible shapes for the selected Matplotlib method. The returned `rows` metadata is the largest first dimension among supplied columns. Setup methods accept required arguments by position or by their documented keyword, such as `{"method":"set_title","kwargs":{"label":"Sales"}}`.
@@ -166,7 +208,7 @@ Each limit is configured by the corresponding environment variable below. Positi
 | `MAX_CALLS` | 128 |
 | `MAX_BINS` / `MAX_CONTOUR_LEVELS` | 200 each |
 
-Figure defaults are 8 × 5 inches at 100 DPI. Dimensions must remain finite and positive, and configured pixel limits apply before rendering.
+Figure defaults are 20.32 × 12.7 cm / 8 x 5 inch at 100 DPI. Dimensions must remain finite and positive, and configured pixel limits apply before rendering.
 
 `MAX_AXES` also bounds the total subplot grid cells, including unused cells. `MAX_ARRAY_ELEMENTS` bounds data and configuration elements separately, streamplot density grid cells, and violin sampling points. `MAX_BINS` applies to histogram counts, explicit bin edges, each `hist2d` axis, and hexbin grid dimensions. With that limit enabled, histogram bins must be an explicit count or edge vector; automatic strategies such as `"auto"` are rejected. `MAX_CONTOUR_LEVELS` applies to counts and explicit level vectors. These checks also cover positional arguments and resolved `$data` references.
 
