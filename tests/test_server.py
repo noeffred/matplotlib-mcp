@@ -7,7 +7,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
-from matplotlib_mcp import server
+from matplotlib_mcp import rendering, server
 from matplotlib_mcp.registry import PLOT_METHODS
 
 
@@ -23,14 +23,14 @@ def simple_config(method="plot", args=None, kwargs=None):
     }
 
 
-def test_renders_png_with_dimensions_and_mcp_image():
-    result = server.create_chart(
+def test_renders_png_with_dimensions_and_metadata():
+    result = rendering.create_chart(
         simple_config(),
         {"format": "columns", "values": {"x": [1, 2, 3], "y": [2, 4, 3]}},
     )
-    assert result[0]._mime_type == "image/png"
-    assert result[0].data.startswith(b"\x89PNG\r\n\x1a\n")
-    metadata = json.loads(result[1].text)
+    assert result[1]["mimeType"] == "image/png"
+    assert result[0].startswith(b"\x89PNG\r\n\x1a\n")
+    metadata = result[1]
     assert metadata["width"] == 240
     assert metadata["height"] == 160
 
@@ -41,13 +41,13 @@ def test_renders_png_with_dimensions_and_mcp_image():
     {"format": "csv", "csv": "x,y\n1,2\n2,3\n"},
 ])
 def test_accepts_each_fresh_data_format(data):
-    png, width, height = server._render(simple_config(), server._prepare_data(data)[0])
+    png, width, height = rendering._render(simple_config(), rendering._prepare_data(data)[0])
     assert png.startswith(b"\x89PNG\r\n\x1a\n")
     assert (width, height) == (240, 160)
 
 
 def test_catalog_is_backed_by_registry():
-    catalog = server._catalog()
+    catalog = rendering._catalog()
     assert set(catalog["plot_methods"]) == set(PLOT_METHODS)
     assert all(item["data_required"] and item["example"] for item in catalog["plot_methods"].values())
 
@@ -56,18 +56,18 @@ def test_unknown_method_is_rejected_before_dispatch():
     cfg = simple_config()
     cfg["axes"][0]["calls"][0]["method"] = "__import__"
     with pytest.raises(server.InputError, match="method is not supported"):
-        server._validate_config(cfg)
+        rendering._validate_config(cfg)
 
 
 def test_missing_data_reference_is_rejected():
     cfg = simple_config()
     with pytest.raises(server.InputError, match="missing column"):
-        server._render(cfg, {"x": [1, 2]})
+        rendering._render(cfg, {"x": [1, 2]})
 
 
 def test_unsupported_method_kwargs_are_rejected():
     with pytest.raises(server.InputError, match="unsupported option"):
-        server._validate_kwargs("plot", {"exec": "print(1)"})
+        rendering._validate_kwargs("plot", {"exec": "print(1)"})
 
 
 @pytest.mark.parametrize("csv_text", [
@@ -75,7 +75,7 @@ def test_unsupported_method_kwargs_are_rejected():
 ])
 def test_rejects_bad_csv(csv_text):
     with pytest.raises(server.InputError):
-        server._prepare_data({"format": "csv", "csv": csv_text})
+        rendering._prepare_data({"format": "csv", "csv": csv_text})
 
 
 def test_subplot_and_polar_composition_renders():
@@ -86,7 +86,7 @@ def test_subplot_and_polar_composition_renders():
             {"subplot": [1, 2, 2], "projection": "polar", "calls": [{"method": "scatter", "args": [{"$data": "theta"}, {"$data": "r"}]}]},
         ],
     }
-    png, _, _ = server._render(config, {"theta": [0.1, 0.5, 0.8], "r": [1, 2, 3]})
+    png, _, _ = rendering._render(config, {"theta": [0.1, 0.5, 0.8], "r": [1, 2, 3]})
     assert png.startswith(b"\x89PNG\r\n\x1a\n")
 
 
@@ -127,8 +127,8 @@ def test_every_registered_chart_method_renders(method, args):
         "figure": {"figsize": [2, 1.5], "dpi": 60},
         "axes": [{"calls": [{"method": method, "args": [reference(item) for item in args]}]}],
     }
-    result = server.create_chart(config, {"format": "columns", "values": data})
-    assert result[0].data.startswith(b"\x89PNG\r\n\x1a\n")
+    result = rendering.create_chart(config, {"format": "columns", "values": data})
+    assert result[0].startswith(b"\x89PNG\r\n\x1a\n")
 
 
 def test_api_key_and_request_size_middleware():
@@ -164,8 +164,8 @@ def test_api_key_and_request_size_middleware():
 
 
 def test_zero_disables_configured_limits(monkeypatch):
-    monkeypatch.setattr(server, "LIMITS", server.Limits(rows=0, columns=0, array_elements=0, data_bytes=0))
-    columns, rows, _ = server._prepare_data({"format": "columns", "values": {"x": [1, 2], "y": [3, 4]}})
+    monkeypatch.setattr(rendering, "LIMITS", rendering.Limits(rows=0, columns=0, array_elements=0, data_bytes=0))
+    columns, rows, _ = rendering._prepare_data({"format": "columns", "values": {"x": [1, 2], "y": [3, 4]}})
     assert rows == 2 and set(columns) == {"x", "y"}
 
 
@@ -207,30 +207,30 @@ def test_concurrent_tool_calls_return_isolated_previews():
         for index, config in enumerate(configs)
     ]
     with ThreadPoolExecutor(max_workers=4) as pool:
-        results = list(pool.map(lambda pair: server.create_chart(*pair), inputs))
+        results = list(pool.map(lambda pair: rendering.create_chart(*pair), inputs))
     assert len(results) == 4
-    assert all(result[0].data.startswith(b"\x89PNG\r\n\x1a\n") for result in results)
+    assert all(result[0].startswith(b"\x89PNG\r\n\x1a\n") for result in results)
 
 
 def test_column_vectors_can_have_different_lengths():
     data = {"format": "columns", "values": {"values": [3, 2], "edges": [0, 1, 2]}}
     config = simple_config("stairs", [{"$data": "values"}, {"$data": "edges"}])
-    result = server.create_chart(config, data)
-    assert json.loads(result[1].text)["rows"] == 3
+    result = rendering.create_chart(config, data)
+    assert result[1]["rows"] == 3
 
 
 def test_row_limit_checks_every_column(monkeypatch):
-    monkeypatch.setattr(server, "LIMITS", server.Limits(rows=2))
+    monkeypatch.setattr(rendering, "LIMITS", rendering.Limits(rows=2))
     with pytest.raises(server.InputError, match="row count"):
-        server._prepare_data({"format": "columns", "values": {"a": [1], "b": [1, 2, 3]}})
+        rendering._prepare_data({"format": "columns", "values": {"a": [1], "b": [1, 2, 3]}})
 
 
 def test_reported_dimensions_match_png_for_fractional_pixels():
     config = simple_config()
     config["figure"] = {"figsize": [3.009, 2.009], "dpi": 100}
-    result = server.create_chart(config, DATA)
-    metadata = json.loads(result[1].text)
-    assert (metadata["width"], metadata["height"]) == struct.unpack(">II", result[0].data[16:24])
+    result = rendering.create_chart(config, DATA)
+    metadata = result[1]
+    assert (metadata["width"], metadata["height"]) == struct.unpack(">II", result[0][16:24])
 
 
 @pytest.mark.parametrize("figure", [
@@ -243,14 +243,14 @@ def test_rejects_invalid_figure_dimensions(figure):
     config = simple_config()
     config["figure"] = figure
     with pytest.raises(server.InputError):
-        server._validate_config(config)
+        rendering._validate_config(config)
 
 
 def test_rejects_oversized_subplot_grid():
     config = simple_config()
     config["axes"][0]["subplot"] = [1_000_000, 1_000_000, 1]
     with pytest.raises(server.InputError, match="subplot grid cells"):
-        server._validate_config(config)
+        rendering._validate_config(config)
 
 
 @pytest.mark.parametrize("method,args,kwargs", [
@@ -267,19 +267,19 @@ def test_rejects_oversized_subplot_grid():
 ])
 def test_allocation_limits_cover_positional_and_vector_options(method, args, kwargs):
     with pytest.raises(server.InputError):
-        server.create_chart(simple_config(method, args, kwargs), DATA)
+        rendering.create_chart(simple_config(method, args, kwargs), DATA)
 
 
 def test_bin_limit_applies_after_resolving_data():
     config = simple_config("hist", [[1, 2]], {"bins": {"$data": "edges"}})
     with pytest.raises(server.InputError, match="histogram bins"):
-        server.create_chart(config, {"format": "columns", "values": {"edges": list(range(202))}})
+        rendering.create_chart(config, {"format": "columns", "values": {"edges": list(range(202))}})
 
 
 def test_zero_disables_bin_limit(monkeypatch):
-    monkeypatch.setattr(server, "LIMITS", server.Limits(bins=0))
-    result = server.create_chart(simple_config("hist", [[1, 2]], {"bins": "auto"}), DATA)
-    assert result[0].data.startswith(b"\x89PNG")
+    monkeypatch.setattr(rendering, "LIMITS", rendering.Limits(bins=0))
+    result = rendering.create_chart(simple_config("hist", [[1, 2]], {"bins": "auto"}), DATA)
+    assert result[0].startswith(b"\x89PNG")
 
 
 @pytest.mark.parametrize("method,kwargs", [
@@ -288,19 +288,19 @@ def test_zero_disables_bin_limit(monkeypatch):
 ])
 def test_generated_sampling_sizes_are_bounded(method, kwargs):
     with pytest.raises(server.InputError, match="configured limit"):
-        server.create_chart(simple_config(method, [[1, 2]], kwargs), DATA)
+        rendering.create_chart(simple_config(method, [[1, 2]], kwargs), DATA)
 
 
 def test_positional_streamplot_density_is_bounded():
     config = simple_config("streamplot", [[0, 1], [0, 1], [[1, 1], [1, 1]], [[0, 0], [0, 0]], 1_000_000])
     with pytest.raises(server.InputError, match="density grid"):
-        server.create_chart(config, DATA)
+        rendering.create_chart(config, DATA)
 
 
 def test_inline_configuration_arrays_are_bounded(monkeypatch):
-    monkeypatch.setattr(server, "LIMITS", server.Limits(array_elements=20))
+    monkeypatch.setattr(rendering, "LIMITS", rendering.Limits(array_elements=20))
     with pytest.raises(server.InputError, match="configuration element count"):
-        server.create_chart(simple_config("plot", [list(range(21))]), DATA)
+        rendering.create_chart(simple_config("plot", [list(range(21))]), DATA)
 
 
 @pytest.mark.parametrize("properties", [
@@ -311,7 +311,7 @@ def test_inline_configuration_arrays_are_bounded(monkeypatch):
 def test_nested_text_properties_cannot_enable_tex_or_font_files(properties):
     config = simple_config("set_title", ["Private title"], {"fontdict": properties})
     with pytest.raises(server.InputError, match="not supported"):
-        server.create_chart(config, DATA)
+        rendering.create_chart(config, DATA)
 
 
 @pytest.mark.parametrize("method,kwargs", [
@@ -322,18 +322,18 @@ def test_nested_text_properties_cannot_enable_tex_or_font_files(properties):
 ])
 def test_setup_methods_accept_required_keyword_arguments(method, kwargs):
     config = {"axes": [{"calls": [{"method": method, "kwargs": kwargs}]}]}
-    assert server.create_chart(config, DATA)[0].data.startswith(b"\x89PNG")
+    assert rendering.create_chart(config, DATA)[0].startswith(b"\x89PNG")
 
 
 def test_matplotlib_warnings_do_not_expose_chart_labels(capsys, caplog):
     config = simple_config("set_title", ["\U0010ffff"], {"fontdict": {"family": "private-font-family"}})
-    server.create_chart(config, DATA)
+    rendering.create_chart(config, DATA)
     assert "private-font-family" not in caplog.text
     assert "Glyph" not in capsys.readouterr().err
 
 
 def test_catalog_csv_example_is_usable():
-    columns, rows, _ = server._prepare_data(server._catalog()["data_formats"]["csv"])
+    columns, rows, _ = rendering._prepare_data(rendering._catalog()["data_formats"]["csv"])
     assert rows == 2 and columns == {"x": [1, 2], "y": [3, 4]}
 
 
@@ -407,7 +407,7 @@ def test_mcp_http_initialize_list_and_render():
     import httpx
 
     http_app = server.mcp.streamable_http_app()
-    app = server.ApiKeyAndBodyLimit(http_app, server.API_KEY, server.LIMITS.request_bytes)
+    app = server.ApiKeyAndBodyLimit(http_app, server.API_KEY, rendering.LIMITS.request_bytes)
     headers = {
         "Authorization": f"Bearer {server.API_KEY}",
         "Accept": "application/json, text/event-stream",
@@ -439,6 +439,89 @@ def test_mcp_http_initialize_list_and_render():
                 assert not result.get("isError")
                 assert server._renderer().process is process
             await server._renderer().close()
+
+    asyncio.run(run())
+
+
+@pytest.fixture
+def encoding_http_app(monkeypatch):
+    # MCP session managers can only enter their lifespan once.
+    monkeypatch.setattr(server.mcp, "_session_manager", None)
+    return server.mcp.streamable_http_app()
+
+
+@pytest.mark.parametrize("encoding,bom", [
+    ("utf-16-le", b""), ("utf-16-le", b"\xff\xfe"),
+    ("utf-16-be", b""), ("utf-16-be", b"\xfe\xff"),
+    ("utf-32-le", b""), ("utf-32-le", b"\xff\xfe\x00\x00"),
+    ("utf-32-be", b""), ("utf-32-be", b"\x00\x00\xfe\xff"),
+])
+@pytest.mark.parametrize("kind", ["ordinary", "nested", "large_nested", "dense"])
+def test_mcp_http_rejects_alternative_json_encodings(encoding, bom, kind, encoding_http_app):
+    import httpx
+
+    params = {"padding": "\u0122"}
+    if kind in {"nested", "large_nested"}:
+        nested = 1
+        for _ in range(80):
+            nested = [nested]
+        params["nested"] = nested
+        if kind == "large_nested":
+            params["large_padding"] = "x" * 9000
+    elif kind == "dense":
+        params["objects"] = [{} for _ in range(130_000)]
+    text = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "ping", "params": params}, ensure_ascii=False)
+    http_app = encoding_http_app
+    app = server.ApiKeyAndBodyLimit(http_app, server.API_KEY, rendering.LIMITS.request_bytes)
+    headers = {
+        "Authorization": f"Bearer {server.API_KEY}",
+        "Accept": "application/json, text/event-stream",
+        "MCP-Protocol-Version": "2025-03-26",
+        "Content-Type": f"application/json; charset={encoding}",
+    }
+
+    async def run():
+        async with http_app.router.lifespan_context(http_app), httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://localhost:8000", headers=headers,
+        ) as client:
+            response = await client.post("/mcp", content=bom + text.encode(encoding))
+            assert response.status_code == 400
+            assert response.json() == {"error": "request body must be UTF-8 JSON without raw NUL bytes"}
+            assert app.reading == app.inflight == app.waiting == app.buffered_bytes == 0
+            response = await client.post("/mcp", content=text.encode("utf-8"))
+            assert response.status_code == (200 if kind == "ordinary" else 413)
+            response = await client.post("/mcp", json={"jsonrpc": "2.0", "id": 2, "method": "ping"})
+            assert response.status_code == 200 and response.json()["result"] == {}
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("bom", [b"", b"\xef\xbb\xbf"])
+@pytest.mark.parametrize("padding_size", [0, 9000])
+def test_mcp_http_accepts_utf8_unicode_and_escaped_strings(bom, padding_size, encoding_http_app):
+    import httpx
+
+    text = json.dumps({
+        "jsonrpc": "2.0", "id": 1, "method": "ping",
+        "params": {"text": '\u0122 café 日本語 😀 "quoted" \\ \x00', "padding": "x" * padding_size},
+    }, ensure_ascii=False)
+    body = bom + text.encode("utf-8")
+    assert server._audit_action(body, {}) == ["ping"]
+    http_app = encoding_http_app
+    app = server.ApiKeyAndBodyLimit(http_app, server.API_KEY, rendering.LIMITS.request_bytes)
+
+    async def run():
+        async with http_app.router.lifespan_context(http_app), httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://localhost:8000",
+            headers={
+                "Authorization": f"Bearer {server.API_KEY}",
+                "Accept": "application/json, text/event-stream",
+                "Content-Type": "application/json",
+                "MCP-Protocol-Version": "2025-03-26",
+            },
+        ) as client:
+            response = await client.post("/mcp", content=body)
+            assert response.status_code == 200 and response.json()["result"] == {}
 
     asyncio.run(run())
 

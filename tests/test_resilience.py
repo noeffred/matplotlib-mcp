@@ -7,7 +7,7 @@ import sys
 
 import pytest
 
-from matplotlib_mcp import server
+from matplotlib_mcp import rendering, server
 from matplotlib_mcp.complexity import Budget, validate_autopct
 from matplotlib_mcp.supervisor import Renderer, RenderError, RenderSettings
 from test_server import DATA, simple_config
@@ -31,9 +31,9 @@ from test_server import DATA, simple_config
 def test_dangerous_calls_rejected_before_figure_creation(method, args, kwargs, monkeypatch):
     def no_figure(*args, **kwargs):
         pytest.fail("validation must finish before creating a figure")
-    monkeypatch.setattr(server, "Figure", no_figure)
+    monkeypatch.setattr(rendering, "Figure", no_figure)
     with pytest.raises(server.InputError):
-        server.create_chart(simple_config(method, args, kwargs), DATA)
+        rendering.create_chart(simple_config(method, args, kwargs), DATA)
 
 
 @pytest.mark.parametrize("rows", [100, 10_000])
@@ -41,18 +41,18 @@ def test_references_are_charged_across_calls_and_axes(monkeypatch, rows):
     call = {"method": "bar", "args": [{"$data": "x"}, {"$data": "y"}]}
     cfg = {"axes": [{"subplot": [1, 2, i], "calls": [call] * 64} for i in (1, 2)]}
     data = {"format": "columns", "values": {"x": list(range(rows)), "y": [1] * rows}}
-    monkeypatch.setattr(server, "Figure", lambda **kwargs: pytest.fail("created figure"))
+    monkeypatch.setattr(rendering, "Figure", lambda **kwargs: pytest.fail("created figure"))
     with pytest.raises(server.InputError, match="chart artists"):
-        server.create_chart(cfg, data)
+        rendering.create_chart(cfg, data)
 
 
 def test_reference_cache_reuses_arrays():
-    result = server._resolve([{ "$data": "x"}, {"$data": "x"}], {"x": [1, 2]})
+    result = rendering._resolve([{ "$data": "x"}, {"$data": "x"}], {"x": [1, 2]})
     assert result[0] is result[1]
 
 
 def test_broadcast_bars_and_budget_boundaries():
-    budget = Budget(replace(server.LIMITS, artists=6, geometry=24))
+    budget = Budget(replace(rendering.LIMITS, artists=6, geometry=24))
     budget.charge("bar", [[1, 2], 1], {})
     assert budget.artists == 6 and budget.geometry == 24
     with pytest.raises(server.InputError, match="artists"):
@@ -60,9 +60,9 @@ def test_broadcast_bars_and_budget_boundaries():
 
 
 def test_violin_ragged_groups_and_barbs_valid():
-    Budget(server.LIMITS).charge("violinplot", [[[1, 2], [1, 2, 3]]], {"points": 100})
-    Budget(server.LIMITS).charge("barbs", [[0], [0], [50], [0]], {"barb_increments": {"flag": 25}})
-    Budget(server.LIMITS).charge("barbs", [[50], [0]], {})
+    Budget(rendering.LIMITS).charge("violinplot", [[[1, 2], [1, 2, 3]]], {"points": 100})
+    Budget(rendering.LIMITS).charge("barbs", [[0], [0], [50], [0]], {"barb_increments": {"flag": 25}})
+    Budget(rendering.LIMITS).charge("barbs", [[50], [0]], {})
     validate_autopct("%1.1f%%", 500)
     validate_autopct("%499.1f!", 500)
     with pytest.raises(server.InputError):
@@ -73,9 +73,9 @@ def test_pixel_budget():
     cfg = simple_config()
     cfg["figure"] = {"figsize": [16, 16], "dpi": 100}
     with pytest.raises(server.InputError, match="pixels"):
-        server._validate_config(cfg)
+        rendering._validate_config(cfg)
     cfg["figure"]["figsize"] = [16, 6.25]
-    assert server._validate_config(cfg)[1:3] == (1600, 625)
+    assert rendering._validate_config(cfg)[1:3] == (1600, 625)
 
 
 @pytest.mark.parametrize("field", RenderSettings.__dataclass_fields__)
@@ -146,6 +146,47 @@ def test_real_process_failure_releases_capacity(mode):
         finally:
             await r.close()
     asyncio.run(run())
+
+
+
+@pytest.mark.parametrize("api_key", [None, "short"])
+def test_worker_renders_without_application_configuration(monkeypatch, api_key):
+    # These would prevent server.py from importing in a fresh interpreter.
+    if api_key is None:
+        monkeypatch.delenv("MCP_API_KEY", raising=False)
+    else:
+        monkeypatch.setenv("MCP_API_KEY", api_key)
+    monkeypatch.setenv("MCP_PORT", "invalid")
+
+    async def run():
+        r = Renderer()
+        try:
+            png, metadata = await r.render(simple_config(), DATA)
+            assert png.startswith(b"\x89PNG")
+            assert (metadata["width"], metadata["height"]) == (240, 160)
+        finally:
+            await r.close()
+    asyncio.run(run())
+
+
+def test_rendering_import_does_not_initialize_application(monkeypatch):
+    import os
+    import subprocess
+
+    monkeypatch.delenv("MCP_API_KEY", raising=False)
+    monkeypatch.setenv("MCP_PORT", "invalid")
+    code = """
+import logging
+import sys
+from matplotlib_mcp import rendering
+
+assert "matplotlib_mcp.server" not in sys.modules
+assert "matplotlib_mcp.supervisor" not in sys.modules
+assert "mcp.server.fastmcp" not in sys.modules
+assert not logging.getLogger("matplotlib_mcp.access").handlers
+"""
+    subprocess.run([sys.executable, "-c", code], env=os.environ.copy(),
+                   check=True, capture_output=True, timeout=30)
 
 
 def test_worker_starts_with_enforced_limit_and_single_blas_thread():
@@ -310,6 +351,65 @@ def test_partial_bodies_share_byte_budget(monkeypatch):
     asyncio.run(run())
 
 
+@pytest.mark.parametrize("mode", ["stalled", "partial", "trickle"])
+def test_body_deadline_releases_saturated_capacity(monkeypatch, mode):
+    async def run():
+        monkeypatch.setattr(server, "SETTINGS", replace(
+            server.SETTINGS, queue_size=1, queue_bytes=100, body_seconds=.15,
+        ))
+        received = []
+        async def app(scope, receive, send):
+            received.append((await receive())["body"])
+            await send({"type": "http.response.start", "status": 200})
+        middleware = server.ApiKeyAndBodyLimit(app, server.API_KEY, 1000)
+        scope = {"type": "http", "headers": [(b"authorization", b"Bearer " + server.API_KEY.encode())]}
+        replies = [[] for _ in range(5)]
+        chunks = [0] * 5
+        cancelled = [False] * 5
+
+        async def upload(index):
+            async def receive():
+                try:
+                    if mode == "stalled" or (mode == "partial" and chunks[index]):
+                        await asyncio.Future()
+                    if chunks[index]:
+                        await asyncio.sleep(.02)
+                    chunks[index] += 1
+                    return {"type": "http.request", "body": b"x", "more_body": True}
+                except asyncio.CancelledError:
+                    cancelled[index] = True
+                    raise
+            async def send(message):
+                replies[index].append(message)
+            await middleware(scope, receive, send)
+
+        async with asyncio.timeout(2):
+            tasks = [asyncio.create_task(upload(i)) for i in range(5)]
+            try:
+                while middleware.reading != 5:
+                    await asyncio.sleep(0)
+                assert middleware.inflight == 5
+                if mode != "stalled":
+                    assert middleware.buffered_bytes >= 5
+                assert (await _request(middleware, b'{"method":"ping"}'))[0]["status"] == 429
+                await asyncio.gather(*tasks)
+            finally:
+                for task in tasks:
+                    task.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
+        assert all(reply[0]["status"] == 408 for reply in replies)
+        assert all(json.loads(reply[1]["body"]) == {"error": "request body deadline exceeded"} for reply in replies)
+        assert all(cancelled)
+        if mode == "trickle":
+            assert all(count > 1 for count in chunks)
+        assert not received
+        assert middleware.reading == middleware.inflight == middleware.waiting == middleware.buffered_bytes == 0
+        assert not middleware.chart_lock.locked()
+        assert (await _request(middleware, b'{"method":"ping"}'))[0]["status"] == 200
+        assert received == [b'{"method":"ping"}']
+    asyncio.run(run())
+
+
 def test_queued_chart_survives_renderer_exit():
     async def run():
         r = Renderer()
@@ -338,11 +438,17 @@ def test_queued_chart_survives_renderer_exit():
 def test_large_control_bodies_wait_before_json_parsing(monkeypatch):
     async def run():
         parsed = []
+        validated = []
         original = server._audit_action
+        original_encoding_check = server._http_json_encoding_valid
+        def encoding_check(body):
+            validated.append(body)
+            return original_encoding_check(body)
         def audit(body, headers):
             parsed.append(body)
             return original(body, headers)
         monkeypatch.setattr(server, "_audit_action", audit)
+        monkeypatch.setattr(server, "_http_json_encoding_valid", encoding_check)
         started, release = asyncio.Event(), asyncio.Event()
         async def app(scope, receive, send):
             body = (await receive())["body"]
@@ -358,11 +464,13 @@ def test_large_control_bodies_wait_before_json_parsing(monkeypatch):
         while middleware.waiting != 1:
             await asyncio.sleep(0)
         assert large not in parsed
+        assert large not in validated
         assert (await _request(middleware, b'{"method":"ping"}'))[0]["status"] == 200
         release.set()
         await active
         assert (await queued)[0]["status"] == 200
         assert large in parsed and middleware.inflight == 0
+        assert large in validated
     asyncio.run(run())
 
 
@@ -411,6 +519,31 @@ def test_http_rejects_dense_json_before_decoder(monkeypatch):
     asyncio.run(run())
 
 
+@pytest.mark.parametrize("invalid", [b"\xff", b"\xc0\xaf", b"\xe2\x82", b"\x00"])
+@pytest.mark.parametrize("padding_size", [0, 9000])
+def test_http_rejects_invalid_encoding_before_scan_or_decoders(monkeypatch, invalid, padding_size):
+    async def run():
+        def rejected(*args):
+            pytest.fail("invalid encoding must be rejected before scanning or decoding")
+        async def app(scope, receive, send):
+            pytest.fail("invalid encoding must not reach MCP")
+        middleware = server.ApiKeyAndBodyLimit(app, server.API_KEY, 20000)
+        with monkeypatch.context() as patch:
+            patch.setattr(server, "_http_json_within_budget", rejected)
+            patch.setattr(server, "_audit_action", rejected)
+            body = b'{"padding":"' + b"x" * padding_size + invalid + b'"}'
+            reply = await _request(middleware, body)
+            assert reply[0]["status"] == 400
+            assert middleware.reading == middleware.inflight == middleware.waiting == middleware.buffered_bytes == 0
+            assert not middleware.chart_lock.locked()
+        async def healthy_app(scope, receive, send):
+            await receive()
+            await send({"type": "http.response.start", "status": 200})
+        middleware.app = healthy_app
+        assert (await _request(middleware, b'{"method":"ping"}'))[0]["status"] == 200
+    asyncio.run(run())
+
+
 def test_legacy_positional_pie_format_still_renders():
-    result = server.create_chart(simple_config("pie", [[1], None, None, None, "%1.1f%%"]), DATA)
-    assert result[0].data.startswith(b"\x89PNG")
+    result = rendering.create_chart(simple_config("pie", [[1], None, None, None, "%1.1f%%"]), DATA)
+    assert result[0].startswith(b"\x89PNG")

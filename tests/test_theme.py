@@ -13,7 +13,7 @@ from PIL import Image
 import pytest
 import yaml
 
-from matplotlib_mcp import server, theme
+from matplotlib_mcp import rendering, theme
 from test_server import DATA, simple_config
 
 
@@ -102,7 +102,7 @@ def test_partial_theme_does_not_change_rcparams(tmp_path):
 
 
 def test_render_applies_defaults_and_explicit_overrides(tmp_path, monkeypatch):
-    monkeypatch.setattr(server, "THEME", corporate_theme(tmp_path))
+    monkeypatch.setattr(rendering, "THEME", corporate_theme(tmp_path))
     captured = []
     original = Figure.savefig
 
@@ -129,7 +129,7 @@ def test_render_applies_defaults_and_explicit_overrides(tmp_path, monkeypatch):
         {"method": "imshow", "args": [[[1, 2], [3, 4]]], "colorbar": True},
     ])
     before = matplotlib.rcParams.copy()
-    png, _, _ = server._render(config, server._prepare_data(DATA)[0])
+    png, _, _ = rendering._render(config, rendering._prepare_data(DATA)[0])
     assert matplotlib.rcParams == before
     assert captured[0] == {
         "colors": ["#003B71", "#00A6A6", "red"], "face": to_rgba("#eeeeee"),
@@ -139,26 +139,26 @@ def test_render_applies_defaults_and_explicit_overrides(tmp_path, monkeypatch):
     assert Image.open(io.BytesIO(png)).getpixel((0, 0)) == (18, 52, 86, 255)
     config["figure"]["facecolor"] = "red"
     config["axes"][0]["calls"].append({"method": "set_title", "args": ["Title"], "kwargs": {"color": "blue"}})
-    png, _, _ = server._render(config, server._prepare_data(DATA)[0])
+    png, _, _ = rendering._render(config, rendering._prepare_data(DATA)[0])
     assert captured[-1]["text"] == "blue"
     assert Image.open(io.BytesIO(png)).getpixel((0, 0)) == (255, 0, 0, 255)
 
 
 def test_opt_out_concurrency_and_restoration_after_failure(tmp_path, monkeypatch):
     config = simple_config()
-    baseline = server._render(config, server._prepare_data(DATA)[0])[0]
-    monkeypatch.setattr(server, "THEME", corporate_theme(tmp_path))
+    baseline = rendering._render(config, rendering._prepare_data(DATA)[0])[0]
+    monkeypatch.setattr(rendering, "THEME", corporate_theme(tmp_path))
     before = matplotlib.rcParams.copy()
-    with pytest.raises(server.InputError):
-        server._render(config, {})
+    with pytest.raises(rendering.InputError):
+        rendering._render(config, {})
     assert matplotlib.rcParams == before
-    with pytest.raises(server.InputError):
-        server.create_chart(simple_config(kwargs={"color": "invalid-color"}), DATA)
+    with pytest.raises(rendering.InputError):
+        rendering.create_chart(simple_config(kwargs={"color": "invalid-color"}), DATA)
     assert matplotlib.rcParams == before
     opted_out = {**config, "theme": False}
     configs = [config, opted_out] * 3
     with ThreadPoolExecutor(max_workers=4) as pool:
-        images = list(pool.map(lambda cfg: server.create_chart(cfg, DATA)[0].data, configs))
+        images = list(pool.map(lambda cfg: rendering.create_chart(cfg, DATA)[0], configs))
     assert all(png == baseline for png in images[1::2])
     assert all(png != baseline for png in images[::2])
     assert matplotlib.rcParams == before
@@ -167,20 +167,20 @@ def test_opt_out_concurrency_and_restoration_after_failure(tmp_path, monkeypatch
 
 
 def test_no_theme_flag_preserves_original_rendering(monkeypatch):
-    monkeypatch.setattr(server, "THEME", theme.Theme())
+    monkeypatch.setattr(rendering, "THEME", theme.Theme())
     config = simple_config()
-    assert server.create_chart(config, DATA)[0].data == server.create_chart({**config, "theme": False}, DATA)[0].data
+    assert rendering.create_chart(config, DATA)[0] == rendering.create_chart({**config, "theme": False}, DATA)[0]
 
 
 @pytest.mark.parametrize("value", [None, "true", 1, {}, []])
 def test_theme_flag_requires_boolean(value):
-    with pytest.raises(server.InputError, match="theme must be boolean"):
-        server._validate_config({**simple_config(), "theme": value})
+    with pytest.raises(rendering.InputError, match="theme must be boolean"):
+        rendering._validate_config({**simple_config(), "theme": value})
 
 
 def test_catalog_exposes_theme_and_color_options(tmp_path, monkeypatch):
-    monkeypatch.setattr(server, "THEME", corporate_theme(tmp_path))
-    catalog = server._catalog()
+    monkeypatch.setattr(rendering, "THEME", corporate_theme(tmp_path))
+    catalog = rendering._catalog()
     assert catalog["theme"]["configured"]
     assert catalog["theme"]["settings"]["colors"]["palette"] == ["#003B71", "#00A6A6"]
     for method in ("ecdf", "errorbar", "quiver"):
@@ -199,4 +199,4 @@ def test_added_plot_colors_render(method, args):
     for setup, values in [("set_title", ["Title"]), ("set_xlabel", ["X"]), ("set_ylabel", ["Y"]),
                           ("axhline", [1]), ("axvline", [1]), ("axhspan", [0, 1]), ("axvspan", [0, 1])]:
         config["axes"][0]["calls"].append({"method": setup, "args": values, "kwargs": {"color": "red"}})
-    assert server.create_chart(config, DATA)[0].data.startswith(b"\x89PNG")
+    assert rendering.create_chart(config, DATA)[0].startswith(b"\x89PNG")

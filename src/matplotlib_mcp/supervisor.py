@@ -24,6 +24,7 @@ class RenderSettings:
     queue_size: int = 50
     queue_bytes: int = 32 * 1024 * 1024
     queue_seconds: int = 30
+    body_seconds: int = 10
     render_seconds: int = 10
     memory_bytes: int = 256 * 1024 * 1024
     recycle_charts: int = 50

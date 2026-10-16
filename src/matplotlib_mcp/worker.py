@@ -12,16 +12,17 @@ import gc
 import json
 import sys
 
-from .server import InputError, create_chart
+from .errors import InputError
+from .rendering import create_chart
 from .supervisor import MAX_REPLY_BYTES
 
 
 def _handle(line: bytes) -> tuple[str, bool]:
     try:
         request = json.loads(line)
-        result = create_chart(request["config"], request["data"])
-        reply = json.dumps({"png": base64.b64encode(result[0].data).decode("ascii"),
-                            "metadata": json.loads(result[1].text)}, separators=(",", ":"))
+        png, metadata = create_chart(request["config"], request["data"])
+        reply = json.dumps({"png": base64.b64encode(png).decode("ascii"),
+                            "metadata": metadata}, separators=(",", ":"))
         if len(reply) + 1 >= MAX_REPLY_BYTES:
             raise InputError("rendered PNG exceeds the response limit")
         return reply, False

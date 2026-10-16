@@ -84,7 +84,9 @@ at runtime; do not include it in the image.
 The server optionally loads `/etc/matplotlib-mcp/theme.yaml` once at startup.
 Set `MCP_THEME_PATH` to select another YAML file. An absent default file keeps
 the existing appearance; an explicitly selected missing file or an invalid
-theme prevents startup. Restart the server after changing the theme or fonts.
+theme prevents startup. Theme and font changes require a container restart
+(or a server restart when running locally). Keep mounted theme files and fonts
+unchanged while the service runs: replacement renderer processes read them again.
 
 The [example theme](examples/theme/theme.yaml) uses DejaVu Sans, which ships
 with the installed Matplotlib package in its `mpl-data/fonts/ttf/` directory.
@@ -249,6 +251,7 @@ Production requires Linux with `RLIMIT_AS`. These settings must be **positive in
 | `RENDER_QUEUE_SIZE` | 50 | Maximum waiting chart/large-body requests (plus one active request) |
 | `RENDER_QUEUE_BYTES` | 33554432 | Aggregate retained HTTP request-body bytes, including partial bodies and active requests |
 | `RENDER_QUEUE_SECONDS` | 30 | Maximum wait before admission |
+| `RENDER_BODY_SECONDS` | 10 | Total deadline to receive the HTTP body after authentication and reader admission; partial chunks do not reset it |
 | `RENDER_TIMEOUT_SECONDS` | 10 | Deadline including renderer startup, validation, rendering, and IPC |
 | `RENDER_MEMORY_BYTES` | 268435456 | Renderer virtual address-space cap, applied before importing plotting libraries |
 | `RENDER_RECYCLE_CHARTS` | 50 | Completed requests before replacing the renderer |
@@ -258,6 +261,10 @@ Production requires Linux with `RLIMIT_AS`. These settings must be **positive in
 OpenBLAS, OpenMP, MKL, and NumExpr thread counts are set to one in the renderer environment. Memory allocation failures, native process exits, and deadlines return safe MCP tool errors. Cancellation kills and reaps an active renderer; cancelled waiting requests release their queue capacity. Disconnect detection depends on transport delivery, so the deadline also bounds work after an undetected disconnect. Shutdown reaps the renderer. PNG responses have a separate 12 MiB encoded IPC ceiling.
 
 Queue or body-buffer saturation returns HTTP **429**, and queue expiration returns HTTP **503**, each with `Retry-After: 1`. These failures occur before MCP tool dispatch. Clients must check HTTP errors as well as MCP `isError`, allow more than 40 seconds for the configured maximum queue-plus-render interval, and retry transient busy errors with backoff. Reducing chart complexity is appropriate for validation, memory, or render-deadline errors. Small ping and catalog calls bypass the chart queue. All bodies over 8 KiB share admission before audit or MCP JSON parsing, so large control requests cannot retain concurrent decoded trees. A linear scan bounds JSON containers, separators, string starts, and nesting before either decoder allocates objects; exceeding that structural budget returns HTTP 413. Quoted contents and escaped quotes are handled without constructing decoded strings. Total in-flight requests are bounded to `RENDER_QUEUE_SIZE + 8`, with at most `RENDER_QUEUE_SIZE + 4` simultaneous body readers.
+
+Incomplete uploads return HTTP **408** when `RENDER_BODY_SECONDS` expires, releasing reader capacity and retained bytes before MCP dispatch. This total upload deadline also bounds clients that keep sending partial chunks. Budget client timeouts for upload time in addition to queue and rendering time. Configure equivalent request-body deadlines on a reverse proxy, if used.
+
+HTTP request bodies must use valid UTF-8 JSON; a UTF-8 BOM is accepted. Invalid UTF-8, raw NUL bytes, and UTF-16/32 bodies (with or without a BOM) return HTTP **400** before structural scanning, audit parsing, or MCP decoding. Charset headers do not enable other encodings. Unicode strings and JSON-escaped NUL characters (`\u0000`) remain supported. Encoding validation follows the same admission rules as the structural scan, including queue admission for bodies over 8 KiB.
 
 Use one application process with the 500 MB deployment profile. Increasing process count multiplies renderer memory and admission capacity. Changing memory, request-body, queue, or complexity settings requires repeating the container load test; `RLIMIT_AS` bounds the child, while the container limit includes the parent, queued bodies, shared libraries, and other charged memory. Keep the chart limits enabled.
 
