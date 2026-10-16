@@ -1,0 +1,1 @@
+"""Stateless Matplotlib MCP server."""

@@ -1,0 +1,17 @@
+# Mount this directory at /etc/matplotlib-mcp (read-only).
+colors:
+  palette: ["#003B71", "#00A6A6", "#F4B400"]
+  figure_background: "#FFFFFF"
+  axes_background: "#FFFFFF"
+  text: "#243746"
+  axes: "#64748B"
+  grid: "#E2E8F0"
+font:
+  family: "DejaVu Sans"
+  size: 11
+  weight: normal
+  style: normal
+  # Replace family with your font's internal family name, and mount its files:
+  # files:
+  #   - fonts/CorporateSans-Regular.ttf
+  #   - fonts/CorporateSans-Bold.ttf
